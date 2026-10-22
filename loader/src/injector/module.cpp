@@ -1,9 +1,8 @@
 #include "module.hpp"
 
-#include <android/dlext.h>
 #include <cstring>
-#include <dlfcn.h>
 #include <fcntl.h>
+#include <string>
 #include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
@@ -13,7 +12,6 @@
 #include <lsplt.hpp>
 
 #include "daemon.hpp"
-#include "dl.hpp"
 #include "files.hpp"
 #include "logging.hpp"
 #include "solist.hpp"
@@ -22,8 +20,8 @@
 
 using namespace std;
 
-ZygiskModule::ZygiskModule(int id, void *handle, void *entry)
-    : id(id), handle(handle), entry{entry}, api{}, mod{nullptr} {
+ZygiskModule::ZygiskModule(int id, struct csoloader *lib, void *entry)
+    : id(id), lib(*lib), entry{entry}, api{}, mod{nullptr} {
     // Make sure all pointers are null
     memset(&api, 0, sizeof(api));
     api.base.impl = this;
@@ -105,7 +103,7 @@ void ZygiskModule::setOption(zygisk::Option opt) {
 
 uint32_t ZygiskModule::getFlags() { return g_ctx ? (g_ctx->info_flags & ~PRIVATE_MASK) : 0; }
 
-bool ZygiskModule::tryUnload() const { return unload && dlclose(handle) == 0; }
+bool ZygiskModule::tryUnload() { return unload && csoloader_unload(&lib); }
 
 // -----------------------------------------------------------------
 
@@ -290,13 +288,24 @@ void ZygiskContext::fork_post() {
 /* Zygisksu changed: Load module fds */
 void ZygiskContext::run_modules_pre() {
     auto ms = zygiskd::ReadModules();
-    auto size = ms.size();
-    for (size_t i = 0; i < size; i++) {
+    for (size_t i = 0; i < ms.size(); i++) {
         auto &m = ms[i];
-        if (void *handle = DlopenMem(m.memfd, RTLD_NOW);
-            void *entry = handle ? dlsym(handle, "zygisk_module_entry") : nullptr) {
-            modules.emplace_back(i, handle, entry);
+
+        std::string path = "/proc/self/fd/" + std::to_string(static_cast<int>(m.memfd));
+        struct csoloader lib = {};
+        if (!csoloader_load(&lib, path.c_str())) {
+            LOGE("failed to load module %s [%s]", m.name.c_str(), path.c_str());
+            continue;
         }
+
+        void *entry = csoloader_get_symbol(&lib, "zygisk_module_entry");
+        if (entry == nullptr) {
+            LOGE("module %s has no zygisk_module_entry", m.name.c_str());
+            csoloader_unload(&lib);
+            continue;
+        }
+
+        modules.emplace_back(i, &lib, entry);
     }
 
     for (auto &m : modules) {
@@ -329,9 +338,6 @@ void ZygiskContext::run_modules_post() {
     if (modules.size() > 0) {
         LOGV("modules unloaded: %zu/%zu", modules_unloaded, modules.size());
         if (modules.size() == modules_unloaded) clean_libc_trace();
-        // "zygisk-module" is the memfd name (zygiskd.rs:264); b4d31ab fixed the same
-        // stale needle in spoof_virtual_maps but missed this call site.
-        clean_linker_trace("zygisk-module", modules.size(), modules_unloaded, true);
         g_hook->should_spoof_maps =
             (flags & APP_SPECIALIZE) && (modules.size() - modules_unloaded) > 0;
     }

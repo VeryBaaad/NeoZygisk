@@ -7,6 +7,8 @@
 #include <span>
 #include <vector>
 
+#include <csoloader.h>
+
 #include "api.hpp"
 #include "daemon.hpp"
 #include "lsplt.hpp"
@@ -208,11 +210,11 @@ struct ZygiskModule {
     int getModuleDir() const;
     void setOption(zygisk::Option opt);
     static uint32_t getFlags();
-    bool tryUnload() const;
+    bool tryUnload();
     void clearApi() { memset(&api, 0, sizeof(api)); }
     int getId() const { return id; }
 
-    ZygiskModule(int id, void *handle, void *entry);
+    ZygiskModule(int id, struct csoloader *lib, void *entry);
 
     static bool RegisterModuleImpl(ApiTable *api, long *module);
 
@@ -220,7 +222,7 @@ private:
     const int id;
     bool unload = false;
 
-    void *const handle;
+    struct csoloader lib;
     union {
         void *const ptr;
         void (*const fn)(void *, void *);
